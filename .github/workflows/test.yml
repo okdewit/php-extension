@@ -1,0 +1,121 @@
+name: tests
+
+on: [push]
+
+jobs:
+  test:
+    name: Test & Build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.0.3', '7.4.16']
+        os: [ubuntu-latest]
+        include: 
+          - php: '8.0.3'
+            php-major: '8.0'
+          - php: '7.4.16'
+            php-major: '7.4'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v1
+
+      - name: Setup packages
+        run: sudo apt-get install pkgconf re2c gdb valgrind
+
+      - name: Get php-src
+        run: git clone https://github.com/php/php-src.git
+
+      - name: Compile php-src
+        run: |
+          cd php-src
+          git checkout php-${{ matrix.php }}
+          ./buildconf --force
+          ./configure --enable-debug --prefix=$HOME/php-bin/DEBUG --with-config-file-path=$HOME/php-bin/DEBUG/etc
+          make -j4
+          make install
+
+      - name: Config php-src
+        run: |
+          echo "~/php-bin/DEBUG/bin" >> $GITHUB_PATH
+          mkdir ~/php-bin/DEBUG/etc
+          cp php.ini ~/php-bin/DEBUG/etc/php.ini
+
+      - name: Compile module
+        run: |
+          phpize
+          ./configure --with-php-config=$HOME/php-bin/DEBUG/bin/php-config
+          make
+          sudo make install
+
+      - name: Test module
+        run: |
+          NO_INTERACTION=1 make test
+
+      - name: Check module
+        run: |
+          php -v
+          php -m | grep test
+
+      - name: Zip
+        run: |
+            zip test-${{ matrix.php-major }}.zip modules/test.so
+
+      - name: Upload matrix artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: test-${{ matrix.php-major }}.zip
+          path: test-${{ matrix.php-major }}.zip
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: test
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    outputs: 
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Get tag
+        id: get_tag
+        run: echo ::set-output name=TAG::${GITHUB_REF/refs\/tags\//}
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+            tag_name: ${{ steps.get_tag.outputs.TAG }}
+            release_name: Release ${{ steps.get_tag.outputs.TAG }}
+            draft: false
+            prerelease: false
+
+  assets:
+    name: Upload Assets
+    runs-on: ubuntu-latest
+    needs: release
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    strategy:
+      matrix:
+        php: ['8.0.3', '7.4.16']
+        os: [ubuntu-latest]
+        include: 
+          - php: '8.0.3'
+            php-major: '8.0'
+          - php: '7.4.16'
+            php-major: '7.4'
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v2
+        with:
+          name: test-${{ matrix.php-major }}.zip
+
+      - name: Upload Asset
+        uses: actions/upload-release-asset@v1
+        env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+            upload_url: ${{ needs.release.outputs.upload_url }}
+            asset_path: ./test-${{ matrix.php-major }}.zip
+            asset_name: test-${{ matrix.php-major }}.zip
+            asset_content_type: application/zip      
